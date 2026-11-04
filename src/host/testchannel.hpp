@@ -25,6 +25,7 @@
 //   cosmetics | cosmetictile <n>         the custom cosmetics and the Customize page's custom section; press a tile
 //   cosmodel ball|hat <id> <model file> [ball image]   a custom cosmetic with a model (models.hpp)
 //   loadasset <path> | matparams <material path or name> | spawnfx <niagara path> <height> [scale]
+//   widgets <Class> [filter] [depth] | palette   a widget tree as text (visibility, enabled, texts); the content browser's categories and items
 //   children <owner class> <panel property> | objarray <class> <filter> <property> | strprop | objprop | listprop <class> <filter> <property>
 //   fnbytes <class> <function> | gc
 //   ballstate | skinmats | slomo <x>      racing balls (skin actor, sphere, material, speed); every ball skin's material

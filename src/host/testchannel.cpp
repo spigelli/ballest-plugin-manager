@@ -70,7 +70,7 @@ bool ReadOnlyCommand(const std::string& name) {
         "viewtarget", "materials", "watch", "children", "fnbytes", "matparams", "race", "ballstate", "ballsave", "hud",
         "widgetpath", "strprop", "objprop", "listprop", "dumptypes", "objbytes", "membytes", "objarray", "cosmetics",
         "skinmats", "sandbox", "sandboxtest", "splitref", "nghost", "nametags", "localrec", "ghostlook", "fade", "waitframes",
-        "wait", "racerun", "agentstate", "render", "seq", "repeat", "gamekeys"};
+        "wait", "racerun", "agentstate", "render", "seq", "repeat", "gamekeys", "widgets", "palette"};
     return kReadOnly.count(name) > 0;
 }
 
@@ -1030,6 +1030,94 @@ void CallNoArgs(const std::string& className, const std::string& function, const
     Report("call " + eng::Describe(p.Fn()) + " on " + eng::PathOf(list.front()) + (p.Invoked() ? " ok" : " FAILED") + result);
 }
 
+// --- the game's UI as data -------------------------------------------------------------------------------------------
+// "widgets <Class> [filter] [depth]": a user widget's tree, one line a widget: depth, class, name, visibility, enabled,
+// and what it shows (a TextBlock's or text box's text, a check box's state, a combo box's choice). For reading the
+// editor's panels (W_Details_C: the pivot, flip and surface buttons) and the palette without a picture.
+// "palette": the editor's content browser as the game builds it: each category in panel order, from the data asset
+// behind it (PDA_MapItem_C.Items: name, class), and how many tiles the category shows.
+std::string TextOf(eng::Obj widget) {
+    eng::Params text = eng::Call(widget, "GetText");
+    size_t size = 0;
+    const uint8_t* bytes = text.Return(&size);
+    if (!bytes || size == 0) return "";
+    eng::Params p(eng::FunctionOn(eng::FindCdo("KismetTextLibrary"), "Conv_TextToString"));
+    p.SetArg(0, bytes, size);
+    eng::Invoke(eng::FindCdo("KismetTextLibrary"), p);
+    const uint8_t* r = p.Return();
+    return r ? eng::ReadFString(r) : std::string();
+}
+
+const char* VisibilityName(uint8_t v) {
+    static const char* const names[] = {"visible", "collapsed", "hidden", "hit-test-invisible", "self-hit-test-invisible"};
+    return v < 5 ? names[v] : "?";
+}
+
+void DumpWidget(eng::Obj w, int depth, int maxDepth, int* lines) {
+    if (!w || depth > maxDepth || *lines > 400) return;
+    ++*lines;
+    static eng::Obj panel = eng::FindClass("PanelWidget"), user = eng::FindClass("UserWidget"),
+                    textBlock = eng::FindClass("TextBlock"), editable = eng::FindClass("EditableText"),
+                    editableBox = eng::FindClass("EditableTextBox"), checkBox = eng::FindClass("CheckBox"),
+                    combo = eng::FindClass("ComboBoxString"), mapItem = eng::FindClass("W_MapItem_C");
+    std::string line(static_cast<size_t>(depth) * 2, ' ');
+    line += eng::ObjName(eng::ClassOf(w)) + " " + eng::ObjName(w);
+    line += " " + std::string(VisibilityName(eng::Call(w, "GetVisibility").ReturnAs<uint8_t>(99)));
+    if (!eng::Call(w, "GetIsEnabled").ReturnBool()) line += " disabled";
+    if (eng::IsA(w, textBlock) || eng::IsA(w, editable) || eng::IsA(w, editableBox)) line += " \"" + TextOf(w) + "\"";
+    if (eng::IsA(w, checkBox)) line += eng::Call(w, "IsChecked").ReturnBool() ? " checked" : " unchecked";
+    if (eng::IsA(w, combo)) {
+        const uint8_t* r = eng::Call(w, "GetSelectedOption").Return();
+        line += " \"" + (r ? eng::ReadFString(r) : std::string()) + "\"";
+    }
+    if (eng::IsA(w, mapItem)) {                 // a palette tile: its S_Item's class
+        const eng::Prop item = eng::FindProp(eng::ClassOf(w), "Item");
+        eng::Obj cls = nullptr;
+        if (item) std::memcpy(&cls, reinterpret_cast<const uint8_t*>(w) + item.offset + 16, sizeof cls);
+        if (cls) line += " class=" + eng::PathOf(cls);
+    }
+    Report(line);
+    if (eng::IsA(w, user)) {
+        eng::Obj tree = eng::ReadObj(w, "WidgetTree");
+        DumpWidget(tree ? eng::ReadObj(tree, "RootWidget") : nullptr, depth + 1, maxDepth, lines);
+    } else if (eng::IsA(w, panel)) {
+        const int32_t n = eng::Call(w, "GetChildrenCount").ReturnAs<int32_t>(0);
+        for (int32_t i = 0; i < n; ++i) DumpWidget(eng::Call(w, "GetChildAt", i).ReturnObj(), depth + 1, maxDepth, lines);
+    }
+}
+
+void Palette(const std::string& c) {
+    const auto roots = Instances("W_Categories_C", "Transient");
+    if (roots.empty()) return Report(c + " -> no content browser (is the editor open?)");
+    eng::Obj box = eng::ReadObj(roots.front(), "VB_Categories");
+    const int32_t n = eng::Call(box, "GetChildrenCount").ReturnAs<int32_t>(0);
+    Report(c + " -> " + std::to_string(n) + " categories");
+    for (int32_t i = 0; i < n; ++i) {
+        eng::Obj cat = eng::Call(box, "GetChildAt", i).ReturnObj();
+        struct { uint32_t index; int32_t number; } name{};
+        eng::ReadBytes(cat, "Category", &name, sizeof name);
+        eng::Obj items = eng::ReadObj(cat, "VB_Items");
+        const int32_t tiles = items ? eng::Call(items, "GetChildrenCount").ReturnAs<int32_t>(0) : 0;
+        eng::Obj pda = eng::ReadObj(cat, "PDA");
+        struct { const uint8_t* data; int32_t num, max; } arr{};
+        if (pda) eng::ReadBytes(pda, "Items", &arr, sizeof arr);
+        const eng::Prop inner = pda ? eng::InnerOf(eng::FindProp(eng::ClassOf(pda), "Items")) : eng::Prop{};
+        const int32_t stride = inner ? inner.size : 24;
+        Report("category " + std::to_string(i) + " " + eng::Name(name.index, name.number) + " header \"" +
+               TextOf(eng::ReadObj(cat, "TB_Header")) + "\" tiles " + std::to_string(tiles) + " items " +
+               std::to_string(arr.data ? arr.num : 0) + (pda ? " asset " + eng::PathOf(pda) : ""));
+        for (int32_t k = 0; arr.data && k < arr.num && k < 200; ++k) {
+            const uint8_t* e = arr.data + static_cast<size_t>(k) * static_cast<size_t>(stride);
+            struct { uint32_t index; int32_t number; } itemName{};
+            std::memcpy(&itemName, e, sizeof itemName);
+            eng::Obj cls = nullptr;
+            std::memcpy(&cls, e + 16, sizeof cls);
+            Report("  " + std::to_string(k) + " " + eng::Name(itemName.index, itemName.number) + " " +
+                   (cls ? eng::PathOf(cls) : std::string("(no class)")));
+        }
+    }
+}
+
 // "callx <Class> <Function> [filter] | arg | arg ...": a call with arguments, for measuring the game.
 //   i:5  f:1.5  d:1.5  u8:3  b:1  s:text (FString)  t:text (FText)  n:name (FName)  o:Class[,filter] (an object)
 //   v:x,y,z (FVector)
@@ -1652,6 +1740,15 @@ void Run(const std::string& cmd) {
         {"extratile", [](const Args& a, const std::string& c) {    // extratile <n>: presses a tile on the shown extra tab
              Report(c + (cosmetics::ClickExtraTile(std::atoi(Arg(a, 1).c_str())) ? " -> ok" : " -> failed"));
          }},
+        {"widgets", [](const Args& a, const std::string& c) {        // widgets <Class> [filter] [depth]: a widget tree as text
+             const auto owners = Instances(Arg(a, 1), Arg(a, 2));
+             if (owners.empty()) return Report(c + " -> no " + Arg(a, 1));
+             int lines = 0;
+             const int depth = Arg(a, 3).empty() ? 12 : std::atoi(Arg(a, 3).c_str());
+             Report(c + " -> " + eng::PathOf(owners.front()));
+             DumpWidget(owners.front(), 0, depth, &lines);
+         }},
+        {"palette", [](const Args&, const std::string& c) { Palette(c); }},
         {"children", [](const Args& a, const std::string&) {       // children <owner class> <property>: a panel's children
              const auto owners = Instances(Arg(a, 1), "Transient");
              if (owners.empty()) return Report("children: no " + Arg(a, 1));
